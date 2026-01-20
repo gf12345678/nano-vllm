@@ -28,9 +28,9 @@ class LLMEngine:
             self.ps.append(process)
             self.events.append(event)
         self.model_runner = ModelRunner(config, 0, self.events)
-        self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True) #主进程负责分词
         config.eos = self.tokenizer.eos_token_id
-        self.scheduler = Scheduler(config)
+        self.scheduler = Scheduler(config) # 主进程负责调度
         atexit.register(self.exit)
 
     def exit(self):
@@ -49,7 +49,7 @@ class LLMEngine:
         seqs, is_prefill = self.scheduler.schedule()
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids)
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished] # 若sequence有完成状态的，则获得其输出
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
         return outputs, num_tokens
 
@@ -74,9 +74,9 @@ class LLMEngine:
             t = perf_counter()
             output, num_tokens = self.step()
             if use_tqdm:
-                if num_tokens > 0:
+                if num_tokens > 0: # prefill 模式
                     prefill_throughput = num_tokens / (perf_counter() - t)
-                else:
+                else:  # decode 模式
                     decode_throughput = -num_tokens / (perf_counter() - t)
                 pbar.set_postfix({
                     "Prefill": f"{int(prefill_throughput)}tok/s",

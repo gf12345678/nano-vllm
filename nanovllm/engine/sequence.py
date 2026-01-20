@@ -16,15 +16,15 @@ class Sequence:
     counter = count()
 
     def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
-        self.seq_id = next(Sequence.counter)
-        self.status = SequenceStatus.WAITING
-        self.token_ids = copy(token_ids)
-        self.last_token = token_ids[-1]
-        self.num_tokens = len(self.token_ids)
-        self.num_prompt_tokens = len(token_ids)
-        self.num_cached_tokens = 0
-        self.block_table = []
-        self.temperature = sampling_params.temperature
+        self.seq_id = next(Sequence.counter) #当前sequence的唯一id
+        self.status = SequenceStatus.WAITING #当前sequence的状态
+        self.token_ids = copy(token_ids) # 存储当前已有的所有的Token ID
+        self.last_token = token_ids[-1] # 最后一个token id
+        self.num_tokens = len(self.token_ids) #当前token的长度，会动态变化
+        self.num_prompt_tokens = len(token_ids) # 当前prompt的token长度,初始化后就不会再改变
+        self.num_cached_tokens = 0 # 被缓存的token数量
+        self.block_table = [] # 该序列独有的物理块映射表，1.它存储了 BlockManager 分配给这个请求的所有物理块索引（如 [45, 102, 11]）2.当模型推理时，Sequence 会把这个表交给 ModelRunner，让 GPU 知道去哪几个“格子”里取 KV 数据。
+        self.temperature = sampling_params.temperature # 采样器信息
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
 

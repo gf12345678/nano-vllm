@@ -34,7 +34,7 @@ class ModelRunner:
         self.warmup_model()
         self.allocate_kv_cache()
         if not self.enforce_eager:
-            self.capture_cudagraph()
+            self.capture_cudagraph() #使用捕捉录制
         torch.set_default_device("cpu") #模型加载结束，避免部分中间变量 临时变量在GPU中污染显存，所以需要切换回CPU
         torch.set_default_dtype(default_dtype)
 
@@ -119,7 +119,7 @@ class ModelRunner:
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
-        block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
+        block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs] #填充拼接 -1
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
 
@@ -176,7 +176,7 @@ class ModelRunner:
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         block_tables = self.prepare_block_tables(seqs)
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables) #每次decode 都会set context，结束后会reset
         return input_ids, positions
 
     def prepare_sample(self, seqs: list[Sequence]):
@@ -202,7 +202,7 @@ class ModelRunner:
             graph_vars["context_lens"].zero_()
             graph_vars["context_lens"][:bs] = context.context_lens
             graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
-            graph.replay()
+            graph.replay()  # 调用cudagraph 回放操作一次，结果输出到字典的output中
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
@@ -229,11 +229,11 @@ class ModelRunner:
         self.graphs = {}
         self.graph_pool = None
 
-        for bs in reversed(self.graph_bs):
+        for bs in reversed(self.graph_bs): # 先录制大的，后录制小的，有助于大的找到连续显存空间
             graph = torch.cuda.CUDAGraph()
             set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
-            with torch.cuda.graph(graph, self.graph_pool):
+            with torch.cuda.graph(graph, self.graph_pool):   # 使用录制
                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
             if self.graph_pool is None:
                 self.graph_pool = graph.pool()
@@ -241,7 +241,7 @@ class ModelRunner:
             torch.cuda.synchronize()
             reset_context()
 
-        self.graph_vars = dict(
+        self.graph_vars = dict(    # CudaGraph的CPU与GPU通信窗口，通过这里传递信息和传出output
             input_ids=input_ids,
             positions=positions,
             slot_mapping=slot_mapping,

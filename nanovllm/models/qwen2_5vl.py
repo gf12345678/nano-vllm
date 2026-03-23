@@ -3,7 +3,6 @@ from torch import nn
 import torch.distributed as dist
 from transformers import AutoConfig
 
-from nanovllm.layers.embed_head import WordEmbedding
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
 from nanovllm.layers.layernorm import RMSNorm
@@ -16,9 +15,9 @@ from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 class Qwen2_5vlMLP(nn.Module):
     def __init__(self,config:AutoConfig):
         super().__init__()
-        self.gate_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False, gather_output=False)
-        self.up_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False, gather_output=False)
-        self.down_proj = ColumnParallelLinear(config.intermediate_size, config.hidden_size, bias=False, gather_output=False)
+        self.gate_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False)
+        self.up_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False)
+        self.down_proj = ColumnParallelLinear(config.intermediate_size, config.hidden_size, bias=False)
         self.act_fn = nn.SiLU
     
     def forward(self,input_hidden:torch.tensor) -> torch.Tensor:
@@ -35,11 +34,11 @@ class Qwen2_5Attention(nn.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
-        self.q_proj = ColumnParallelLinear(self.hidden_size, self.num_heads * self.head_dim, bias=True, gather_output=False)
-        self.k_proj = ColumnParallelLinear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=True, gather_output=False)
-        self.v_proj = ColumnParallelLinear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=True, gather_output=False)
+        self.q_proj = ColumnParallelLinear(self.hidden_size, self.num_heads * self.head_dim, bias=True)
+        self.k_proj = ColumnParallelLinear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=True)
+        self.v_proj = ColumnParallelLinear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=True)
         self.o_proj = RowParallelLinear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-        self.rotary_emb = RotaryEmbedding(self.head_dim,self.max_position_embeddings,self.rope_theta)
+        self.rotary_emb = get_rope(self.head_dim,rotary_dim=self.head_dim,max_position=self.max_position_embeddings,base=self.rope_theta,rope_scaling=None)
         self.attn = Attention(self.num_heads,self.head_dim,config.sliding_window,self.num_kv_heads)
     
     def forward(self, input_hiddens:torch.Tensor, position:torch.Tensor) -> torch.Tensor:
@@ -55,18 +54,18 @@ class Qwen2_5Attention(nn.Module):
 class Qwen2_5DecoderLayer(nn.Module):
     def __init__(self, config:AutoConfig):
         super().__init__()
-        self.input_norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.att = Qwen2_5Attention(config)
-        self.post_norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.self_attn= Qwen2_5Attention(config)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mlp = Qwen2_5vlMLP(config)
         
     def forward(self,input_hiddens:torch.Tensor, position:torch.Tensor) -> torch.Tensor:
         residual = input_hiddens
-        input_hiddens = self.input_norm(input_hiddens)
-        input_hiddens = self.att(input_hiddens,position)
+        input_hiddens = self.input_layernorm(input_hiddens)
+        input_hiddens = self.self_attn(input_hiddens,position)
         input_hiddens = residual + input_hiddens
         residual = input_hiddens
-        input_hiddens = self.post_norm(input_hiddens)
+        input_hiddens = self.post_attention_layernorm(input_hiddens)
         input_hiddens = self.mlp(input_hiddens)
         input_hiddens = residual + input_hiddens
         return input_hiddens
@@ -77,12 +76,12 @@ class Qwen2_5DecoderLayer(nn.Module):
 class Qwen2_5vlModel(nn.Module):
     def __init__(self,config:AutoConfig):
         super().__init__()
-        self.embedding = VocabParallelEmbedding(config.vocab_size,config.hidden_size)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,config.hidden_size)
         self.layers = nn.ModuleList([Qwen2_5DecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         
     def forward(self,input_ids:torch.Tensor, position:torch.Tensor) -> torch.Tensor:
-        hidden_status = self.embedding(input_ids)
+        hidden_status = self.embed_tokens(input_ids)
         for layer in self.layers:
             hidden_status = layer(hidden_status,position)
         hidden_status = self.norm(hidden_status)

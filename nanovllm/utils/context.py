@@ -13,7 +13,7 @@ class Context:
     context_lens: torch.Tensor | None = None # 上下文有效长度。记录每个序列到目前为止总共拥有多少个 Token。
     block_tables: torch.Tensor | None = None # 块寻址表。一个二维矩阵，记录了每个序列按顺序占用的所有物理块 ID。
 
-_CONTEXT = Context()
+_CONTEXT = Context() #全局变量 用于全局控制
 
 def get_context():
     return _CONTEXT

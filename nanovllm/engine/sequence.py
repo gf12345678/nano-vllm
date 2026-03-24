@@ -5,10 +5,10 @@ from itertools import count
 from nanovllm.sampling_params import SamplingParams
 
 
-class SequenceStatus(Enum):
-    WAITING = auto()
-    RUNNING = auto()
-    FINISHED = auto()
+class SequenceStatus(Enum): #当前seq 状态
+    WAITING = auto() # auto的枚举类 默认赋值1
+    RUNNING = auto() # auto的枚举类 默认赋值2
+    FINISHED = auto() # auto的枚举类 默认赋值3
 
 
 class Sequence:
@@ -35,47 +35,47 @@ class Sequence:
         return self.token_ids[key]
 
     @property
-    def is_finished(self):
+    def is_finished(self): #当前状态是否完成
         return self.status == SequenceStatus.FINISHED
 
     @property
-    def num_completion_tokens(self):
+    def num_completion_tokens(self): #decode 生成token数量
         return self.num_tokens - self.num_prompt_tokens
 
     @property
-    def prompt_token_ids(self):
+    def prompt_token_ids(self): #获得全部prompt token id
         return self.token_ids[:self.num_prompt_tokens]
 
     @property
-    def completion_token_ids(self):
+    def completion_token_ids(self): #获得全部decode token id
         return self.token_ids[self.num_prompt_tokens:]
 
     @property
-    def num_cached_blocks(self):
+    def num_cached_blocks(self): #获得已经存储的block数量
         return self.num_cached_tokens // self.block_size
 
     @property
-    def num_blocks(self):
+    def num_blocks(self): # 获得block已用数量
         return (self.num_tokens + self.block_size - 1) // self.block_size
 
     @property
-    def last_block_num_tokens(self):
+    def last_block_num_tokens(self): #获得最后一个block 内存储token的数量
         return self.num_tokens - (self.num_blocks - 1) * self.block_size
 
-    def block(self, i):
+    def block(self, i): #获得 i 块对应的全部token id
         assert 0 <= i < self.num_blocks
         return self.token_ids[i*self.block_size: (i+1)*self.block_size]
 
-    def append_token(self, token_id: int):
+    def append_token(self, token_id: int): #添加生成的token
         self.token_ids.append(token_id)
         self.last_token = token_id
         self.num_tokens += 1
 
-    def __getstate__(self):
+    def __getstate__(self): #打包返回当前对象参数
         return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table,
                 self.token_ids if self.num_completion_tokens == 0 else self.last_token)
 
-    def __setstate__(self, state):
+    def __setstate__(self, state): #解包 修改当前对象参数
         self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table = state[:-1]
         if self.num_completion_tokens == 0:
             self.token_ids = state[-1]

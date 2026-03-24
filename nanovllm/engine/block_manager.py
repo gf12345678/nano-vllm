@@ -10,37 +10,37 @@ class Block:
     def __init__(self, block_id):
         self.block_id = block_id #当前block的 id 号
         self.ref_count = 0 # 当前block 被多少sequence引用
-        self.hash = -1 #当前block的唯一hash值，根据前缀token和当前block的token决定
+        self.hash = -1 #当前block的唯一hash值，根据前缀token和当前block的token决定 hash是block满了才计算
         self.token_ids = [] #当前block的kv cache 存储的token id序列
 
-    def update(self, hash: int, token_ids: list[int]):
+    def update(self, hash: int, token_ids: list[int]): #更新
         self.hash = hash
         self.token_ids = token_ids
 
-    def reset(self):
+    def reset(self): #重置
         self.ref_count = 1
         self.hash = -1
         self.token_ids = []
 
 
-class BlockManager:
+class BlockManager:  #全局唯一的大block类
 
     def __init__(self, num_blocks: int, block_size: int):
         self.block_size = block_size # 每个block可以存多少个token的kv cache
-        self.blocks: list[Block] = [Block(i) for i in range(num_blocks)] #申请多少个block，之前根据剩余显存计算过
-        self.hash_to_block_id: dict[int, int] = dict() 
-        self.free_block_ids: deque[int] = deque(range(num_blocks))
-        self.used_block_ids: set[int] = set()
+        self.blocks: list[Block] = [Block(i) for i in range(num_blocks)] #申请多少个block，之前根据剩余显存计算过，id是从0到num-1
+        self.hash_to_block_id: dict[int, int] = dict() #哈希值对应的block id
+        self.free_block_ids: deque[int] = deque(range(num_blocks)) #空余block id，这里是双向队列 
+        self.used_block_ids: set[int] = set() #已用block id ，这里是set集合
 
     @classmethod
-    def compute_hash(cls, token_ids: list[int], prefix: int = -1):
+    def compute_hash(cls, token_ids: list[int], prefix: int = -1): #计算哈希，hash id 只有block满了才有，因为满了才能确认前缀有没有重复
         h = xxhash.xxh64()
         if prefix != -1:
             h.update(prefix.to_bytes(8, "little"))
         h.update(np.array(token_ids).tobytes())
         return h.intdigest()
 
-    def _allocate_block(self, block_id: int) -> Block:
+    def _allocate_block(self, block_id: int) -> Block: # 内存分配
         block = self.blocks[block_id]
         assert block.ref_count == 0
         block.reset()
@@ -48,12 +48,12 @@ class BlockManager:
         self.used_block_ids.add(block_id)
         return self.blocks[block_id]
 
-    def _deallocate_block(self, block_id: int) -> Block:
+    def _deallocate_block(self, block_id: int) -> Block: # 内存释放
         assert self.blocks[block_id].ref_count == 0
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
 
-    def can_allocate(self, seq: Sequence) -> bool:
+    def can_allocate(self, seq: Sequence) -> bool: # 对当前seq的block需要数量，剩余block是否能满足
         return len(self.free_block_ids) >= seq.num_blocks
 
     def allocate(self, seq: Sequence):  # 给刚进入系统、还没分配内存的请求分配空间

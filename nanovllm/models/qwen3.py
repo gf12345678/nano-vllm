@@ -87,21 +87,21 @@ class Qwen3Attention(nn.Module):
         return output
 
 
-class Qwen3MLP(nn.Module):
+class Qwen3MLP(nn.Module): # mlp 由 gate，up，激活函数，down 四部分组成，这里要注意跨gpu切分的问题
 
     def __init__(
         self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
+        hidden_size: int, #hidden
+        intermediate_size: int,  #升维和降维的大小，是up和down，gate用的
+        hidden_act: str, #激活函数
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
+        self.gate_up_proj = MergedColumnParallelLinear( # 按output切分 Column是列的意思，这里就是列并行
             hidden_size,
-            [intermediate_size] * 2,
+            [intermediate_size] * 2, #这里 gate 和 up 合并为一个矩阵操作，这样可并行操作
             bias=False,
         )
-        self.down_proj = RowParallelLinear(
+        self.down_proj = RowParallelLinear( #按照input切分，row parallel 行并行
             intermediate_size,
             hidden_size,
             bias=False,
@@ -111,7 +111,7 @@ class Qwen3MLP(nn.Module):
 
     def forward(self, x):
         gate_up = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+        x = self.act_fn(gate_up) #这里对x分割后操作，前半部分是gate再激活，后半部分是up，然后一起按位乘
         x = self.down_proj(x)
         return x
 

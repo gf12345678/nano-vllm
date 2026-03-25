@@ -2,7 +2,6 @@ import os
 from nanovllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
-
 def main():
     path = os.path.expanduser("~/huggingface/Qwen3-0.6B")
     # path = os.path.expanduser("~/huggingface/Qwen2.5-0.5B")
@@ -22,6 +21,7 @@ def main():
         )
         for prompt in prompts
     ]
+
     outputs = llm.generate(prompts, sampling_params)
 
     for prompt, output in zip(prompts, outputs):

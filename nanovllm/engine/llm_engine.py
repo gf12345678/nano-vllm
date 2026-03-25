@@ -16,12 +16,12 @@ class LLMEngine:
 
     def __init__(self, model, **kwargs):
         config_fields = {field.name for field in fields(Config)}
-        config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
+        config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}# 判断当前读取的config是否是需要的config，过滤不需要的
         config = Config(model, **config_kwargs)
-        self.ps = []
-        self.events = []
+        self.ps = [] #多卡列表
+        self.events = [] #多卡的通信事件
         ctx = mp.get_context("spawn")
-        for i in range(1, config.tensor_parallel_size):
+        for i in range(1, config.tensor_parallel_size): #起子进程，tensor_parallel_size是并行的卡数，0号卡由主进程负责
             event = ctx.Event()
             process = ctx.Process(target=ModelRunner, args=(config, i, event))
             process.start()

@@ -34,8 +34,8 @@ class BlockManager:  #全局唯一的大block类
 
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1): #计算哈希，hash id 只有block满了才有，因为满了才能确认前缀有没有重复
-        h = xxhash.xxh64()
-        if prefix != -1:
+        h = xxhash.xxh64() #prefix是上一个block的 hash id
+        if prefix != -1: # 第一个block 没有前block  prefix 为 -1
             h.update(prefix.to_bytes(8, "little"))
         h.update(np.array(token_ids).tobytes())
         return h.intdigest()
@@ -53,12 +53,12 @@ class BlockManager:  #全局唯一的大block类
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
 
-    def can_allocate(self, seq: Sequence) -> bool: # 对当前seq的block需要数量，剩余block是否能满足
+    def can_allocate(self, seq: Sequence) -> bool: # 对当前seq的block需要数量，剩余block是否能满足 prefill阶段
         return len(self.free_block_ids) >= seq.num_blocks
 
-    def allocate(self, seq: Sequence):  # 给刚进入系统、还没分配内存的请求分配空间
+    def allocate(self, seq: Sequence):  # 给刚进入系统、还没分配内存的请求分配空间 prefill阶段
         assert not seq.block_table  # 判断seq的 block table 为空
-        h = -1
+        h = -1  #初始化为-1 每轮for循环迭代变化
         cache_miss = False
         for i in range(seq.num_blocks): # 当前token_num//block_size向上取整后的返回值，代表需要多少block
             token_ids = seq.block(i) #对应block的token id的切片
@@ -75,25 +75,25 @@ class BlockManager:  #全局唯一的大block类
                     block = self.blocks[block_id]
                     block.ref_count += 1 #这块的引用加1 
                 else:
-                    block = self._allocate_block(block_id) #这块 token id 存在 但是都没被用，属于预备释放状态，但是内容还没清除，正好可以续用
+                    block = self._allocate_block(block_id) #这块 token id 存在 但是都没被用，属于已经释放，但是id未解除状态，也需要重新分配
             if h != -1: # 当前token id 可以填满整个块的情况下（不论是否存过）
                 block.update(h, token_ids) # 更新块内的哈希id和token ids
                 self.hash_to_block_id[h] = block_id # 更新table
             seq.block_table.append(block_id) #sequence 的block table更新（不填满的情况下也更新）
 
-    def deallocate(self, seq: Sequence):
+    def deallocate(self, seq: Sequence): #释放seq的全部block(不是真释放，是引用-1，引用为零才真释放)
         for block_id in reversed(seq.block_table):
             block = self.blocks[block_id]
             block.ref_count -= 1
             if block.ref_count == 0:
-                self._deallocate_block(block_id)
+                self._deallocate_block(block_id) #引用为零真释放
         seq.num_cached_tokens = 0
         seq.block_table.clear()
 
-    def can_append(self, seq: Sequence) -> bool:
-        return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
+    def can_append(self, seq: Sequence) -> bool: #decode阶段
+        return len(self.free_block_ids) >= (len(seq) % self.block_size == 1) #只有在多一个token的情况下，并且有free的情况下，才return true
 
-    def may_append(self, seq: Sequence):
+    def may_append(self, seq: Sequence): #decode阶段
         block_table = seq.block_table
         last_block = self.blocks[block_table[-1]]
         if len(seq) % self.block_size == 1: #需要新增block，上一个block已经填满

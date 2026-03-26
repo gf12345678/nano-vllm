@@ -249,7 +249,7 @@ class ModelRunner:
             torch.cuda.synchronize() #
             reset_context() #清理上下文
 
-        self.graph_vars = dict(    # self加一层引用，保证内存地址不会被释放(input_ids,positions这些) 创建字典，用于
+        self.graph_vars = dict(    # self加一层引用，保证内存地址不会被释放(input_ids,positions这些) 创建字典，这个字典的地址就是后面所有回放跑的地址
             input_ids=input_ids,
             positions=positions,
             slot_mapping=slot_mapping,

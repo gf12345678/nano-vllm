@@ -59,7 +59,7 @@ class Attention(nn.Module):
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context() #获得全局信息 
         k_cache, v_cache = self.k_cache, self.v_cache
-        if k_cache.numel() and v_cache.numel():
+        if k_cache.numel() and v_cache.numel(): # warm_up的时候不存kv cache
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping) #在这里对KV cache进行block缓存
         if context.is_prefill:
             if context.block_tables is not None:    # prefix cache

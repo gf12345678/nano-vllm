@@ -19,7 +19,7 @@ class LLMEngine:
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}# 判断当前读取的config是否是需要的config，过滤不需要的
         config = Config(model, **config_kwargs)
         self.ps = [] #多卡列表
-        self.events = [] #多卡的通信事件
+        self.events = [] #多卡的通信事件，用于同步
         ctx = mp.get_context("spawn")
         for i in range(1, config.tensor_parallel_size): #起子进程，tensor_parallel_size是并行的卡数，0号卡由主进程负责
             event = ctx.Event()
@@ -47,7 +47,7 @@ class LLMEngine:
 
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
-        token_ids = self.model_runner.call("run", seqs, is_prefill)
+        token_ids = self.model_runner.call("run", seqs, is_prefill) # 子进程和主进程同步执行
         self.scheduler.postprocess(seqs, token_ids)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished] # 若sequence有完成状态的，则获得其输出
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)

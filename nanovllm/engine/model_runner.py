@@ -31,7 +31,7 @@ class ModelRunner:
         
         model_type = getattr(hf_config, "model_type", "qwen3")
         if model_type == "qwen3":
-            self.model = Qwen3ForCausalLM(hf_config)
+            self.model = Qwen3ForCausalLM(hf_config) #每个进程都起model(model会被切割，按照tp数)
         else:
             raise ValueError(f"Unsupported model type : { model_type }")
                 
@@ -42,18 +42,18 @@ class ModelRunner:
         self.warmup_model()
         self.allocate_kv_cache()
         if not self.enforce_eager:
-            self.capture_cudagraph() #使用捕捉录制
+            self.capture_cudagraph() #使用捕捉录制 cuda graph！
         torch.set_default_device("cpu") #模型加载结束，避免部分中间变量 临时变量在GPU中污染显存，所以需要切换回CPU
         torch.set_default_dtype(default_dtype)
 
         if self.world_size > 1:
             if rank == 0:
-                self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
-                dist.barrier()
+                self.shm = SharedMemory(name="nanovllm", create=True, size=2**20) #主进程的share memory 用于分发任务和tp合并，2的10次是1K，2的20次是1M，2的30次是1GB
+                dist.barrier() # 同步
             else:
-                dist.barrier()
-                self.shm = SharedMemory(name="nanovllm")
-                self.loop()
+                dist.barrier() # 阻塞同步等待主进程的barrier
+                self.shm = SharedMemory(name="nanovllm")  #子进程 链接 主进程的share memory
+                self.loop() #子进程死循环
 
     def exit(self):
         if self.world_size > 1:
@@ -66,46 +66,46 @@ class ModelRunner:
         torch.cuda.synchronize()
         dist.destroy_process_group()
 
-    def loop(self):
+    def loop(self): #loop 子进程死循环
         while True:
             method_name, args = self.read_shm()
-            self.call(method_name, *args)
+            self.call(method_name, *args) #子进程调用的具体方法
             if method_name == "exit":
                 break
 
     def read_shm(self):
         assert self.world_size > 1 and self.rank > 0
-        self.event.wait()
+        self.event.wait() # 自我阻塞
         n = int.from_bytes(self.shm.buf[0:4], "little")
-        method_name, *args = pickle.loads(self.shm.buf[4:n+4])
-        self.event.clear()
+        method_name, *args = pickle.loads(self.shm.buf[4:n+4]) #反序列号
+        self.event.clear() # 清除标志位
         return method_name, args
 
     def write_shm(self, method_name, *args):
-        assert self.world_size > 1 and self.rank == 0
-        data = pickle.dumps([method_name, *args])
+        assert self.world_size > 1 and self.rank == 0 #断言确定是主进程
+        data = pickle.dumps([method_name, *args]) #序列号二进制
         n = len(data)
-        self.shm.buf[0:4] = n.to_bytes(4, "little")
+        self.shm.buf[0:4] = n.to_bytes(4, "little") #前四个字节记录本次传输的长度n
         self.shm.buf[4:n+4] = data
         for event in self.event:
-            event.set()
+            event.set() #主进程 通知 子进程解除阻塞(read_shm)
 
-    def call(self, method_name, *args):
-        if self.world_size > 1 and self.rank == 0:
+    def call(self, method_name, *args): 
+        if self.world_size > 1 and self.rank == 0: #主进程写入共享内存
             self.write_shm(method_name, *args)
-        method = getattr(self, method_name, None)
+        method = getattr(self, method_name, None) #子进程读取共享内存
         return method(*args)
 
     def warmup_model(self):
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.empty_cache() #清空内存
+        torch.cuda.reset_peak_memory_stats() #
         max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len
         num_seqs = min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs)
-        seqs = [Sequence([0] * max_model_len) for _ in range(num_seqs)] #模拟峰值
-        self.run(seqs, True)
-        torch.cuda.empty_cache()
+        seqs = [Sequence([0] * max_model_len) for _ in range(num_seqs)] #构建最大seqs去模拟峰值
+        self.run(seqs, True) #prefill的
+        torch.cuda.empty_cache() #清空内存
 
-    def allocate_kv_cache(self):
+    def allocate_kv_cache(self): #分配KV cache
         config = self.config
         hf_config = config.hf_config
         free, total = torch.cuda.mem_get_info()
@@ -143,7 +143,7 @@ class ModelRunner:
         for seq in seqs:
             seqlen = len(seq) #sequence中token id的数量
             input_ids.extend(seq[seq.num_cached_tokens:]) #将前面已经被缓存过的切掉(别的sequence存过)，剩余没缓存的token id 并入input_ids
-            positions.extend(list(range(seq.num_cached_tokens, seqlen))) #缓存剩余没缓存的token id的绝对位置编码
+            positions.extend(list(range(seq.num_cached_tokens, seqlen))) #缓存剩余没缓存的token id的绝对位置编码,然后range 序列
             seqlen_q = seqlen - seq.num_cached_tokens # q为需要推理的长度(没缓存过的长度)
             seqlen_k = seqlen # sequence 的全部长度
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q) # 针对 Query 的偏移量 
@@ -153,12 +153,12 @@ class ModelRunner:
             if not seq.block_table:    #block为空
                 continue
             for i in range(seq.num_cached_blocks, seq.num_blocks): #sequence中未缓存的block 
-                start = seq.block_table[i] * self.block_size #获得sequence的block id  e.g. [3, 32, 45, 7, 1]
+                start = seq.block_table[i] * self.block_size #获得sequence的未还缓存的block id  e.g. [3, 32, 45, 7, 1]
                 if i != seq.num_blocks - 1: #是否为block序列中的最后一个块
-                    end = start + self.block_size #最后一个块可能没满，需要特殊处理
+                    end = start + self.block_size #不是最后一个块，位移直接是 start + size
                 else:
-                    end = start + seq.last_block_num_tokens #最后块满了，无需特殊处理
-                slot_mapping.extend(list(range(start, end))) #获得对应的显存地址空间
+                    end = start + seq.last_block_num_tokens #没满 start + 最后的block的token 数量
+                slot_mapping.extend(list(range(start, end))) #slot获得对应的显存地址空间，attention计算的时候 用
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # 判断是否存在前缀缓存prefix cache，如果有前缀缓存，则需要建立表格进行查表
             block_tables = self.prepare_block_tables(seqs) # 获得二维的block table
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
@@ -178,7 +178,7 @@ class ModelRunner:
             input_ids.append(seq.last_token)
             positions.append(len(seq) - 1)
             context_lens.append(len(seq))
-            slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
+            slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1) #只取最后一个token的物理映射
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -196,12 +196,12 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
-        if is_prefill or self.enforce_eager or input_ids.size(0) > 512: #长序列，prefill 启动eager模式
+        if is_prefill or self.enforce_eager or input_ids.size(0) > 512: #prefill 启动eager模式
             return self.model.compute_logits(self.model(input_ids, positions))
         else: #decode 使用cuda graph模式 
-            bs = input_ids.size(0)
+            bs = input_ids.size(0) #
             context = get_context()
-            graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+            graph = self.graphs[next(x for x in self.graph_bs if x >= bs)] #bs向上取整，获得回放graph对象
             graph_vars = self.graph_vars
             graph_vars["input_ids"][:bs] = input_ids
             graph_vars["positions"][:bs] = positions
@@ -210,46 +210,46 @@ class ModelRunner:
             graph_vars["context_lens"].zero_()
             graph_vars["context_lens"][:bs] = context.context_lens
             graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
-            graph.replay()  # 调用cudagraph 回放操作一次，结果输出到字典的output中
+            graph.replay()  # 调用cuda graph 回放操作一次，结果输出到字典的output中
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
-    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]: #主进程和子进程同时执行的部分
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None #主进程获得采样器
-        logits = self.run_model(input_ids, positions, is_prefill)
-        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None #采样
+        logits = self.run_model(input_ids, positions, is_prefill) #调用decode的cuda graph或者prefill的forward
+        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None #采样只在gpu0上
         reset_context()
         return token_ids
 
     @torch.inference_mode()
-    def capture_cudagraph(self):
+    def capture_cudagraph(self): #cuda graph 设置cuda graph
         config = self.config
         hf_config = config.hf_config
-        max_bs = min(self.config.max_num_seqs, 512)
-        max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
-        input_ids = torch.zeros(max_bs, dtype=torch.int64)
-        positions = torch.zeros(max_bs, dtype=torch.int64)
-        slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
-        context_lens = torch.zeros(max_bs, dtype=torch.int32)
-        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
-        outputs = torch.zeros(max_bs, hf_config.hidden_size)
+        max_bs = min(self.config.max_num_seqs, 512) #按照最大进行预跑
+        max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size #按照最大进行预跑
+        input_ids = torch.zeros(max_bs, dtype=torch.int64) #按照最大进行预跑
+        positions = torch.zeros(max_bs, dtype=torch.int64)#按照最大进行预跑
+        slot_mapping = torch.zeros(max_bs, dtype=torch.int32)#按照最大进行预跑
+        context_lens = torch.zeros(max_bs, dtype=torch.int32)#按照最大进行预跑
+        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)#按照最大进行预跑
+        outputs = torch.zeros(max_bs, hf_config.hidden_size)#按照最大进行预跑
         self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
         self.graphs = {}
         self.graph_pool = None
 
-        for bs in reversed(self.graph_bs): # 先录制大的，后录制小的，有助于大的找到连续显存空间
-            graph = torch.cuda.CUDAGraph()
+        for bs in reversed(self.graph_bs): # 先录制大的，后录制小的，有助于大的找到连续显存空间，解决内存碎片化：CUDA Graph 需要“私有”的内存池（Memory Pool）。
+            graph = torch.cuda.CUDAGraph() #创建录像带
             set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
-            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
-            with torch.cuda.graph(graph, self.graph_pool):   # 使用录制
+            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # Warmup先跑一次
+            with torch.cuda.graph(graph, self.graph_pool):   # 开始录制 图捕获
                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
-            if self.graph_pool is None:
-                self.graph_pool = graph.pool()
-            self.graphs[bs] = graph
-            torch.cuda.synchronize()
-            reset_context()
+            if self.graph_pool is None: #self.graph_pool 共享显存池，第一次的显存最大，把这块显存保留，后面都在这块显存上跑
+                self.graph_pool = graph.pool() #显存保留，后面的小bs都用这个显存
+            self.graphs[bs] = graph #将录像带存入记录数组中
+            torch.cuda.synchronize() #
+            reset_context() #清理上下文
 
-        self.graph_vars = dict(    # CudaGraph的CPU与GPU通信窗口，通过这里传递信息和传出output
+        self.graph_vars = dict(    # self加一层引用，保证内存地址不会被释放(input_ids,positions这些) 创建字典，用于
             input_ids=input_ids,
             positions=positions,
             slot_mapping=slot_mapping,

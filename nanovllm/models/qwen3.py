@@ -45,8 +45,8 @@ class Qwen3Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=qkv_bias,
-        )
-        self.o_proj = RowParallelLinear(
+        ) 
+        self.o_proj = RowParallelLinear( #o是行并行，要规约
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
@@ -71,19 +71,19 @@ class Qwen3Attention(nn.Module):
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor, # n*1048,hidden_size 是1024
     ) -> torch.Tensor:
-        qkv = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.view(-1, self.num_heads, self.head_dim)
-        k = k.view(-1, self.num_kv_heads, self.head_dim)
+        qkv = self.qkv_proj(hidden_states) # [n, 4096] q 2048  kv都是1024
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1) # QKV 切分  q: $[n, 2048]$ k: $[n, 1024]$  v: $[n, 1024]$
+        q = q.view(-1, self.num_heads, self.head_dim) #q分多头 q: $[n, 16, 128]$
+        k = k.view(-1, self.num_kv_heads, self.head_dim) #kv 分多头 k和v都是: $[n, 8, 128]$
         v = v.view(-1, self.num_kv_heads, self.head_dim)
         if not self.qkv_bias:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
-        q, k = self.rotary_emb(positions, q, k)
-        o = self.attn(q, k, v)
-        output = self.o_proj(o.flatten(1, -1))
+            q = self.q_norm(q) #RMSnorm不改变形状
+            k = self.k_norm(k) 
+        q, k = self.rotary_emb(positions, q, k) # 不改变形状
+        o = self.attn(q, k, v) # o: $[n, 16, 128]$
+        output = self.o_proj(o.flatten(1, -1)) # output: $[n, 1048]$
         return output
 
 

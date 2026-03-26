@@ -106,7 +106,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         tp_size = dist.get_world_size()
         total_num_kv_heads = total_num_kv_heads or total_num_heads
         self.head_size = head_size
-        self.num_heads = divide(total_num_heads, tp_size)
+        self.num_heads = divide(total_num_heads, tp_size) # num_heads是Q的头数
         self.num_kv_heads = divide(total_num_kv_heads, tp_size)
         output_size = (total_num_heads + 2 * total_num_kv_heads) * self.head_size
         super().__init__(hidden_size, output_size, bias)
@@ -115,14 +115,14 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data = param.data
         assert loaded_shard_id in ["q", "k", "v"]
         if loaded_shard_id == "q":
-            shard_size = self.num_heads * self.head_size
-            shard_offset = 0
+            shard_size = self.num_heads * self.head_size #Q矩阵长度
+            shard_offset = 0 #偏移量 0
         elif loaded_shard_id == "k":
             shard_size = self.num_kv_heads * self.head_size
-            shard_offset = self.num_heads * self.head_size
+            shard_offset = self.num_heads * self.head_size #偏移量是 Q的维度
         else:
             shard_size = self.num_kv_heads * self.head_size
-            shard_offset = self.num_heads * self.head_size + self.num_kv_heads * self.head_size
+            shard_offset = self.num_heads * self.head_size + self.num_kv_heads * self.head_size #偏移量是Q+K的维度
         param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
         loaded_weight = loaded_weight.chunk(self.tp_size, self.tp_dim)[self.tp_rank]
         param_data.copy_(loaded_weight)

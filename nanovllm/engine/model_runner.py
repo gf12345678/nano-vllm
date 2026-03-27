@@ -55,7 +55,7 @@ class ModelRunner:
                 self.shm = SharedMemory(name="nanovllm")  #子进程 链接 主进程的share memory
                 self.loop() #子进程死循环
 
-    def exit(self):
+    def exit(self): #退出进程需要释放资源
         if self.world_size > 1:
             self.shm.close()
             dist.barrier()
